@@ -1,0 +1,513 @@
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom">
+    <channel>
+        <title>Posts on Cacao Coder</title>
+        <link>https://cacaocoder.github.io/posts/</link>
+        <description>Recent content in Posts on Cacao Coder</description>
+        <generator>Hugo -- gohugo.io</generator>
+        <language>en</language>
+        <lastBuildDate>Wed, 26 Feb 2025 00:00:00 +0000</lastBuildDate>
+        <atom:link href="https://cacaocoder.github.io/posts/index.xml" rel="self" type="application/rss+xml" />
+        
+        <item>
+            <title>Developing a Bot to Automate Farming in an Online Video Game</title>
+            <link>https://cacaocoder.github.io/posts/2025/02/developing-a-bot-to-automate-farming-in-an-online-video-game/</link>
+            <pubDate>Wed, 26 Feb 2025 00:00:00 +0000</pubDate>
+            
+            <guid>https://cacaocoder.github.io/posts/2025/02/developing-a-bot-to-automate-farming-in-an-online-video-game/</guid>
+            <description>&lt;h2 id=&#34;project-overview&#34;&gt;Project Overview&lt;/h2&gt;
+&lt;p&gt;Everything described here is purely for educational purposes (and, of course, for the fun of it).
+The goal is to make a bot that does boring tasks in a farming game.
+The source code is &lt;a href=&#34;https://github.com/CacaoCoder/farming-bot&#34;&gt;here&lt;/a&gt;, but I removed anything that could show what game it is.
+Variable and function names are changed..&lt;/p&gt;
+&lt;p&gt;The game is built with Unity and runs on the IL2CPP runtime. It is a casual online farming game where players can plant and harvest crops, among other activities.&lt;/p&gt;</description>
+            <content type="html"><![CDATA[<h2 id="project-overview">Project Overview</h2>
+<p>Everything described here is purely for educational purposes (and, of course, for the fun of it).
+The goal is to make a bot that does boring tasks in a farming game.
+The source code is <a href="https://github.com/CacaoCoder/farming-bot">here</a>, but I removed anything that could show what game it is.
+Variable and function names are changed..</p>
+<p>The game is built with Unity and runs on the IL2CPP runtime. It is a casual online farming game where players can plant and harvest crops, among other activities.</p>
+<p>It is a Microsoft Store app that runs in a protected environment called an AppContainer. Each such app has a unique AppContainer SID (Security Identifier) and an AppContainer process token.
+These apps have restricted Windows privileges, a lower integrity level, and limited access to system and user resources. They can only use what the developer specifies in the manifest.
+When the game tries to access a file, registry key, or load a DLL, Windows checks the SIDs in its process token. If access is not allowed, the request is denied.</p>
+<p>In this blog post, I will share key moments of my attempts to hack the game in chronological order.</p>
+<h2 id="initial-approach-createremotethread-loadlibrary-and-manual-mapping">Initial Approach: CreateRemoteThread, LoadLibrary, and Manual Mapping</h2>
+<p>At the start, I was not aware of the nature of the game, apart from the fact that it is a Unity game, which I checked through the game folder.
+My first attempt was to try injecting an empty DLL to see if I could achieve code execution.
+I used a common method:
+calling <code>CreateRemoteThread</code> with the address of <code>LoadLibrary</code> to load my DLL into the game. The game didn’t crash, but the DLL wasn’t loaded either.</p>
+<p>At this point, I should have already investigated the nature of what was happening, but instead, I decided to try out a more advanced DLL injection method:
+Manual Mapping. Manual Mapping is useful because it avoids the module list registration of the loaded DLL. This is because when we load our DLL normally using
+<code>LoadLibrary</code>, it is registered in the PEB (Process Environment Block), which makes the injection easy to detect through different hooking methods and easy to unload with <code>FreeLibrary</code>.</p>
+<p>There is a good <a href="https://www.youtube.com/watch?v=qzZTXcBu3cE">tutorial from Guided Hacking</a> that covers Manual Mapping, so I followed it, trying to understand everything and use the code for myself.
+While the tutorial provided the code, it did little to explain the concepts behind it. This led me to do a lot of research,
+where I learned about the structure of PE files and how to work with them at a low level in C++.
+Now, I will describe the highlights of what I learned about Manual Mapping.</p>
+<h4 id="loading-the-dll-into-memory">Loading the DLL into Memory</h4>
+<p>First, we need to copy all sections of the DLL into the target process.
+To do this, we rely on the PE headers, starting with <code>IMAGE_NT_HEADERS</code>, which contains <code>OptionalHeader</code> and <code>FileHeader</code>.
+We retrieve the pointer to <code>IMAGE_NT_HEADERS</code> using the DOS header and the <code>e_lfanew</code> value like so:</p>
+<pre tabindex="0"><code>pOldNtHeader = reinterpret_cast&lt;IMAGE_NT_HEADERS*&gt;(pSrcData + reinterpret_cast&lt;IMAGE_DOS_HEADER*&gt;(pSrcData)-&gt;e_lfanew);
+</code></pre><p>Next, we allocate memory based on <code>OptionalHeader-&gt;SizeOfImage</code> and determine the preferred memory address using <code>OptionalHeader-&gt;ImageBase</code>.
+Since this address is often occupied, we call <code>VirtualAllocEx</code> with <code>NULL</code> to let the OS decide the location.</p>
+<p>To access the section headers, we use:</p>
+<pre tabindex="0"><code>_IMAGE_SECTION_HEADER* pSectionHeader = IMAGE_FIRST_SECTION(pOldNtHeader);
+</code></pre><p>Then, we iterate through each section and map it into the target process:</p>
+<pre tabindex="0"><code>for (UINT i = 0; i != pOldFileHeader-&gt;NumberOfSections; ++i, ++pSectionHeader)
+{
+    if (pSectionHeader-&gt;SizeOfRawData)
+    {
+        if (!WriteProcessMemory(hProc, pTargetBase + pSectionHeader-&gt;VirtualAddress, 
+            pSrcData + pSectionHeader-&gt;PointerToRawData, pSectionHeader-&gt;SizeOfRawData, nullptr))
+        {
+            printf(&#34;Can&#39;t map sections: 0x%x\n&#34;, GetLastError());
+            delete[] pSrcData;
+            VirtualFreeEx(hProc, pTargetBase, 0, MEM_RELEASE);
+            return false;
+        }
+    }
+}
+</code></pre><h4 id="the-shellcode-function">The Shellcode Function</h4>
+<p>The actual manual mapping happens in a shellcode function. It requires specific arguments, passed in a struct:</p>
+<pre tabindex="0"><code>struct MANUAL_MAPPING_DATA
+{
+	f_LoadLibraryA pLoadLibraryA;
+	f_GetProcAddress pGetProcAddress;
+	HINSTANCE hMod;
+};
+</code></pre><p>The challenge here is that function calls in machine code expect known function addresses. But since our DLL loads at a random address in the target process, our shellcode must be <strong>position-independent</strong>.</p>
+<p>Interestingly, <code>Kernel32.dll</code> tends to be loaded at the same address across different processes. This allows us to retrieve its address from our process and pass it to the shellcode.</p>
+<p>Once everything is set, we allocate memory in the target process and create a remote thread to execute the shellcode. At this point, we are replicating what the OS loader does when loading a DLL.
+This process can be broken into three parts:</p>
+<ol>
+<li><strong>Applying relocations</strong></li>
+<li><strong>Resolving imports</strong></li>
+<li><strong>Executing TLS callbacks</strong></li>
+</ol>
+<h4 id="step-1-applying-relocations">Step 1: Applying Relocations</h4>
+<p>If the DLL cannot be loaded at its preferred address, absolute pointers inside the DLL become invalid. The relocation process fixes these addresses.</p>
+<p>The <strong>relocation table</strong> is found in the <code>IMAGE_DIRECTORY_ENTRY_BASERELOC</code> entry of the <strong>DataDirectory array</strong>. It contains relocation blocks, each with:</p>
+<ul>
+<li>A virtual address (the page where relocations apply)</li>
+<li>The block size</li>
+<li>An array of WORD entries describing each relocation</li>
+</ul>
+<p>The lowest 12 bits of an entry store the <strong>offset</strong> within the page, while the highest 4 bits indicate the <strong>relocation type</strong> (e.g., <code>IMAGE_REL_BASED_DIR64</code> for 64-bit pointers).
+To determine the relocation type, we use these macros:</p>
+<pre tabindex="0"><code>#define RELOC_FLAG32(RelInfo) ((RelInfo &gt;&gt; 0x0C) == IMAGE_REL_BASED_HIGHLOW)
+#define RELOC_FLAG64(RelInfo) ((RelInfo &gt;&gt; 0x0C) == IMAGE_REL_BASED_DIR64)
+
+#ifdef _WIN64
+    #define RELOC_FLAG RELOC_FLAG64
+#else
+    #define RELOC_FLAG RELOC_FLAG32
+#endif
+</code></pre><p>The <strong>LocationDelta</strong> represents the difference between the preferred and actual load addresses:</p>
+<pre tabindex="0"><code>BYTE* LocationDelta = pBase - pOpt-&gt;ImageBase;
+</code></pre><p>We process each relocation entry by adjusting the stored pointer value:</p>
+<pre tabindex="0"><code>UINT AmountOfEntries = (pRelocData-&gt;SizeOfBlock - sizeof(IMAGE_BASE_RELOCATION)) / sizeof(WORD);
+WORD* pRelativeInfo = reinterpret_cast&lt;WORD*&gt;(pRelocData + 1);
+
+for (UINT i = 0; i != AmountOfEntries; ++i, ++pRelativeInfo)
+{
+    if (RELOC_FLAG(*pRelativeInfo))
+    {
+        UINT_PTR* pPatch = reinterpret_cast&lt;UINT_PTR*&gt;(
+            pBase + pRelocData-&gt;VirtualAddress + ((*pRelativeInfo) &amp; 0xFFF)
+        );
+        *pPatch += reinterpret_cast&lt;UINT_PTR&gt;(LocationDelta);
+    }
+}
+</code></pre><h4 id="step-2-resolving-imports">Step 2: Resolving Imports</h4>
+<p>Whenever a program calls a function from another DLL, it relies on the <strong>Import Address Table (IAT)</strong>.
+The import table is found in <code>IMAGE_DIRECTORY_ENTRY_IMPORT</code>. It consists of an array of descriptors, each pointing to:</p>
+<ul>
+<li>The <strong>DLL name</strong></li>
+<li>The <strong>Import Lookup Table</strong> (aka <strong>OriginalFirstThunk</strong> within <code>_IMAGE_IMPORT_DESCRIPTOR</code>) – a list of function names or ordinals</li>
+<li>The <strong>Import Address Table</strong> (aka <strong>FirstThunk</strong> within <code>_IMAGE_IMPORT_DESCRIPTOR</code>) – where function addresses will be stored</li>
+</ul>
+<p>We first load the required DLL:</p>
+<pre tabindex="0"><code>char* szMod = reinterpret_cast&lt;char*&gt;(pBase + pImportDescr-&gt;Name);
+HINSTANCE hDll = _LoadLibraryA(szMod);
+</code></pre><p>In some PE files, <strong>OriginalFirstThunk</strong> and <strong>FirstThunk</strong> point to the same array. Each entry in these arrays is known as <code>IMAGE_THUNK_DATA</code>:</p>
+<pre tabindex="0"><code>union IMAGE_THUNK_DATA {
+    LPSTR ForwarderString;
+    DWORD Function;
+    DWORD Ordinal;
+    PIMAGE_IMPORT_BY_NAME AddressOfData;
+};
+</code></pre><p>We need to check if those do point to the same array:</p>
+<pre tabindex="0"><code>if (!pThunkRef)
+    pThunkRef = pFuncRef;
+</code></pre><p>Finally, we iterate over the import entries:</p>
+<pre tabindex="0"><code>for (; *pThunkRef; ++pThunkRef, ++pFuncRef)
+{
+    if (IMAGE_SNAP_BY_ORDINAL(*pThunkRef))
+    {
+        // Import by ordinal
+        *pFuncRef = _GetProcAddress(hDll, reinterpret_cast&lt;char*&gt;(*pThunkRef &amp; 0xFFFF));
+    }
+    else
+    {
+        // Import by name
+        auto* pImport = reinterpret_cast&lt;IMAGE_IMPORT_BY_NAME*&gt;(
+            pBase + (*pThunkRef)
+        );
+        *pFuncRef = _GetProcAddress(hDll, pImport-&gt;Name);
+    }
+}
+</code></pre><p>We check whether the import is by ordinal or name and resolve the function accordingly.</p>
+<h4 id="step-3-executing-tls-callbacks">Step 3: Executing TLS Callbacks</h4>
+<p>Some DLLs define <strong>Thread Local Storage (TLS) callbacks</strong>, which run whenever a thread is created or terminated. These are used to initialize per-thread data.
+The <strong>TLS directory</strong> is found at <code>IMAGE_DIRECTORY_ENTRY_TLS</code>:</p>
+<pre tabindex="0"><code>if (pOpt-&gt;DataDirectory[IMAGE_DIRECTORY_ENTRY_TLS].Size)
+{
+    auto* pTLS = reinterpret_cast&lt;IMAGE_TLS_DIRECTORY*&gt;(pBase + pOpt-&gt;DataDirectory[IMAGE_DIRECTORY_ENTRY_TLS].VirtualAddress);
+    auto* pCallback = reinterpret_cast&lt;PIMAGE_TLS_CALLBACK*&gt;(pTLS-&gt;AddressOfCallBacks);
+    
+    for (; pCallback &amp;&amp; *pCallback; ++pCallback)
+        (*pCallback)(pBase, DLL_PROCESS_ATTACH, nullptr);
+}
+</code></pre><p>We iterate through the callback list and execute each function with <code>DLL_PROCESS_ATTACH</code> as an argument.
+In the end, all that’s left is to call a DLL entry point.</p>
+<h4 id="result-of-manual-mapping-attempt">Result of Manual Mapping Attempt</h4>
+<p>The manual mapping attempt also failed, but there were no crashes. Something felt off, and I suspected the game had protection against <code>CreateRemoteThread</code>.</p>
+<p>Using the x64dbg debugger, I set a breakpoint on <code>LoadLibrary</code>, stepped into a few calls, and traced a function.
+I did this both for my <code>LoadLibrary</code> call and for when the game loaded its own libraries. Then I compared the trace results.
+That’s when I discovered that Microsoft Store apps run within the AppContainer.</p>
+<p>My next best guess was to temporarily hijack a thread and execute shellcode directly, avoiding DLL injection altogether.</p>
+<h2 id="getting-code-execution-thread-hijacking">Getting Code Execution: Thread Hijacking</h2>
+<p>As usual, the first step is to get the PID of the target process:</p>
+<pre tabindex="0"><code>DWORD GetPID(const wchar_t* processName) {
+    PROCESSENTRY32W entry;
+    entry.dwSize = sizeof(PROCESSENTRY32W);
+    HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, NULL);
+
+    if (Process32FirstW(snapshot, &amp;entry) == TRUE) {
+        do {
+            std::wstring binPath = entry.szExeFile;
+            if (binPath.find(processName) != std::wstring::npos) {
+                CloseHandle(snapshot);
+                return entry.th32ProcessID;
+            }
+        } while (Process32NextW(snapshot, &amp;entry) == TRUE);
+    }
+    CloseHandle(snapshot);
+    return 0;
+}
+</code></pre><p>We take a snapshot of all processes and iterate over them until we find the one we need.</p>
+<p>Then, we get a handle to the process:</p>
+<pre tabindex="0"><code>HANDLE hProc = OpenProcess(PROCESS_ALL_ACCESS, FALSE, PID);
+</code></pre><p>Next, we need to get the thread ID of the thread we want to hijack. I used x64dbg to explore and found that the 10th thread
+(starting from 0) was stable even after suspension.
+So, I wrote a function to get a thread ID based on its creation order:</p>
+<pre tabindex="0"><code>uint32_t GetNthProcessThreadID(HANDLE hProc, int n) {
+    THREADENTRY32 entry;
+    entry.dwSize = sizeof(THREADENTRY32);
+    HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+
+    uint32_t PID = GetProcessId(hProc);
+    int threadCount = 0;
+
+    if (Thread32First(snapshot, &amp;entry) == TRUE) {
+        do {
+            if (entry.th32OwnerProcessID == PID) {
+                if (threadCount == n) {
+                    CloseHandle(snapshot);
+                    return entry.th32ThreadID;
+                }
+                threadCount++;
+            }
+        } while (Thread32Next(snapshot, &amp;entry) == TRUE);
+    }
+
+    CloseHandle(snapshot);
+    return NULL;
+}
+</code></pre><p>Using this thread ID, we get a handle to the thread, suspend it, set the RIP to our shellcode, and resume it.
+The method worked well in testing, so I moved on to writing the actual shellcode.</p>
+<h2 id="developing-shellcode">Developing Shellcode</h2>
+<p>A thread can be suspended at any time. This means it might be in the middle of an important calculation,
+a memory operation that locks other threads, or processing a received packet.
+To avoid issues, our hijacking must be quick and restore the thread&rsquo;s state exactly as it was.</p>
+<p>We start by saving all CPU registers and flags. In x86, a single instruction does this, but in x64, it must be done manually:</p>
+<pre tabindex="0"><code>pushf
+push rax
+push rcx
+push rdx
+push rbx
+push rbp
+push rsi
+push rdi
+push r8
+push r9
+push r10
+push r11
+push r12
+push r13
+push r14
+push r15
+</code></pre><h4 id="x64-calling-convention-considerations">x64 Calling Convention Considerations</h4>
+<p>There are two key things to remember:</p>
+<ol>
+<li><strong>Stack Alignment</strong>: The stack must be aligned to 16 bytes before making a call. We ensure this with:</li>
+</ol>
+<pre tabindex="0"><code>mov r15,rsp   ; Save RSP to restore later
+and rsp,0xfffffffffffffff0
+</code></pre><ol start="2">
+<li><strong>Shadow Space</strong>: The Windows x64 ABI requires allocating 32 bytes on the stack before calling a function,
+even though the first four arguments are passed through registers. The callee may use this space to store register values temporarily:</li>
+</ol>
+<pre tabindex="0"><code>sub rsp,0x20
+</code></pre><p>Before doing this, we should also save the XMM registers. I found that unlike general-purpose registers, <code>push</code> cannot be used for them, so we do:</p>
+<pre tabindex="0"><code>sub rsp,0xa0
+movaps XMMWORD PTR [rsp],xmm6
+movaps XMMWORD PTR [rsp+0x10],xmm7
+movaps XMMWORD PTR [rsp+0x20],xmm8
+movaps XMMWORD PTR [rsp+0x30],xmm9
+movaps XMMWORD PTR [rsp+0x40],xmm10
+movaps XMMWORD PTR [rsp+0x50],xmm11
+movaps XMMWORD PTR [rsp+0x60],xmm12
+movaps XMMWORD PTR [rsp+0x70],xmm13
+movaps XMMWORD PTR [rsp+0x80],xmm14
+movaps XMMWORD PTR [rsp+0x90],xmm15
+</code></pre><p>For convenience in assembling, I used this <a href="https://defuse.ca/online-x86-assembler.htm">online x64 assembler/disassembler</a>,
+which provides structured output in multiple formats, including array literals.</p>
+<h4 id="making-the-call">Making the Call</h4>
+<p>Next, we move the function argument and function address into <code>rcx</code> and <code>rax</code> before making a call:</p>
+<pre tabindex="0"><code>movabs rcx,0xaaaaaaaaaaaaaaaa
+movabs rax,0xbbbbbbbbbbbbbbbb
+call rax
+</code></pre><p>These are placeholders. The actual addresses will be determined and written at runtime.</p>
+<h4 id="restoring-thread-state">Restoring Thread State</h4>
+<p>After execution, we restore the thread state to its original condition:</p>
+<pre tabindex="0"><code>add rsp,0x20
+movaps xmm15,XMMWORD PTR [rsp+0x90]
+movaps xmm14,XMMWORD PTR [rsp+0x80]
+movaps xmm13,XMMWORD PTR [rsp+0x70]
+movaps xmm12,XMMWORD PTR [rsp+0x60]
+movaps xmm11,XMMWORD PTR [rsp+0x50]
+movaps xmm10,XMMWORD PTR [rsp+0x40]
+movaps xmm9,XMMWORD PTR [rsp+0x30]
+movaps xmm8,XMMWORD PTR [rsp+0x20]
+movaps xmm7,XMMWORD PTR [rsp+0x10]
+movaps xmm6,XMMWORD PTR [rsp]
+add rsp,0xa0
+mov rsp,r15
+pop r15
+pop r14
+pop r13
+pop r12
+pop r11
+pop r10
+pop r9
+pop r8
+pop rdi
+pop rsi
+pop rbp
+pop rbx
+pop rdx
+pop rcx
+pop rax
+popf
+</code></pre><h4 id="returning-control">Returning Control</h4>
+<p>Finally, we return to where the thread was suspended. I found that in x86, this is usually done with:</p>
+<pre tabindex="0"><code>push OriginalRIP
+ret
+</code></pre><p>However, it seems that in x64, pushing absolute values like this is not allowed. Instead, the only way that worked for me was to
+jump to an address relative to the current RIP, where the original RIP is stored:</p>
+<pre tabindex="0"><code>jmp QWORD PTR [rip+0xe]
+</code></pre><p>The <code>0xe</code> offset is arbitrary, creating space between the instructions and the stored RIP
+(for easier viewing in the x64dbg disassembly output). I fill this space with <code>0x90</code> (<code>nop</code>) bytes for clarity.</p>
+<h4 id="resulting-raw-shellcode-bytes">Resulting Raw Shellcode Bytes</h4>
+<p>After assembling, the raw shellcode bytes are:</p>
+<pre tabindex="0"><code>BYTE shellcodeSkeleton[] = // 107th byte is beginning of argument to the function (8 bytes). 117th byte is beginning of a function address (8 bytes).
+    // 248th byte is a placeholder for the saved RIP to jump back to (8 bytes)
+{ 
+    0x9C, 0x50, 0x51, 0x52, 0x53, 0x55, 0x56, 0x57, 0x41, 0x50, 0x41, 0x51, 0x41, 0x52, 0x41, 0x53, 0x41, 0x54, 0x41, 0x55, 0x41, 0x56, 0x41, 0x57, 0x49, 0x89, 0xE7, 0x48, 0x83, 0xE4, 
+    0xF0, 0x48, 0x81, 0xEC, 0xA0, 0x00, 0x00, 0x00, 0x0F, 0x29, 0x34, 0x24, 0x0F, 0x29, 0x7C, 0x24, 0x10, 0x44, 0x0F, 0x29, 0x44, 0x24, 0x20, 0x44, 0x0F, 0x29, 0x4C, 0x24, 0x30, 0x44, 
+    0x0F, 0x29, 0x54, 0x24, 0x40, 0x44, 0x0F, 0x29, 0x5C, 0x24, 0x50, 0x44, 0x0F, 0x29, 0x64, 0x24, 0x60, 0x44, 0x0F, 0x29, 0x6C, 0x24, 0x70, 0x44, 0x0F, 0x29, 0xB4, 0x24, 0x80, 0x00, 
+    0x00, 0x00, 0x44, 0x0F, 0x29, 0xBC, 0x24, 0x90, 0x00, 0x00, 0x00, 0x48, 0x83, 0xEC, 0x20, 0x48, 0xB9, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0x48, 0xB8, 0xBB, 0xBB, 0xBB, 
+    0xBB, 0xBB, 0xBB, 0xBB, 0xBB, 0xFF, 0xD0, 0x48, 0x83, 0xC4, 0x20, 0x44, 0x0F, 0x28, 0xBC, 0x24, 0x90, 0x00, 0x00, 0x00, 0x44, 0x0F, 0x28, 0xB4, 0x24, 0x80, 0x00, 0x00, 0x00, 0x44, 
+    0x0F, 0x28, 0x6C, 0x24, 0x70, 0x44, 0x0F, 0x28, 0x64, 0x24, 0x60, 0x44, 0x0F, 0x28, 0x5C, 0x24, 0x50, 0x44, 0x0F, 0x28, 0x54, 0x24, 0x40, 0x44, 0x0F, 0x28, 0x4C, 0x24, 0x30, 0x44, 
+    0x0F, 0x28, 0x44, 0x24, 0x20, 0x0F, 0x28, 0x7C, 0x24, 0x10, 0x0F, 0x28, 0x34, 0x24, 0x48, 0x81, 0xC4, 0xA0, 0x00, 0x00, 0x00, 0x4C, 0x89, 0xFC, 0x41, 0x5F, 0x41, 0x5E, 0x41, 0x5D,
+    0x41, 0x5C, 0x41, 0x5B, 0x41, 0x5A, 0x41, 0x59, 0x41, 0x58, 0x5F, 0x5E, 0x5D, 0x5B, 0x5A, 0x59, 0x58, 0x9D, 0xFF, 0x25, 0x0E, 0x00, 0x00, 0x00, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 
+    0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA 
+};
+</code></pre><h2 id="thread-hijacking-final-touches">Thread Hijacking: Final Touches</h2>
+<p>Here’s how we do it:</p>
+<pre tabindex="0"><code>void* pArgToShellcodeFunc = VirtualAllocEx(hProc, nullptr, sizeof(ArgToShellcodeFunc), MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+WriteProcessMemory(hProc, pArgToShellcodeFunc, &amp;arg, sizeof(arg), nullptr);
+
+void* pShellcodeFunc = VirtualAllocEx(hProc, nullptr, 0x1000, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+WriteProcessMemory(hProc, pShellcodeFunc, ShellcodeFunc, 0x1000, nullptr);
+
+uint32_t threadID = GetNthProcessThreadID(hProc, 10);
+
+HANDLE hThread = OpenThread((THREAD_GET_CONTEXT | THREAD_SUSPEND_RESUME | THREAD_SET_CONTEXT), false, threadID);
+SuspendThread(hThread);
+
+CONTEXT threadContext;
+threadContext.ContextFlags = CONTEXT_CONTROL; 
+GetThreadContext(hThread, &amp;threadContext);
+uint64_t RIP = threadContext.Rip;
+
+memcpy(&amp;shellcodeSkeleton[107], &amp;pArgToShellcodeFunc, 8);
+memcpy(&amp;shellcodeSkeleton[117], &amp;pShellcodeFunc, 8);
+memcpy(&amp;shellcodeSkeleton[248], &amp;RIP, 8);
+
+void* pFilledShellcode = VirtualAllocEx(hProc, nullptr, sizeof(shellcodeSkeleton), MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+WriteProcessMemory(hProc, pFilledShellcode, &amp;shellcodeSkeleton, sizeof(shellcodeSkeleton), nullptr);
+
+threadContext.Rip = (uint64_t)pFilledShellcode;
+SetThreadContext(hThread, &amp;threadContext);
+ResumeThread(hThread);
+</code></pre><p>First, we allocate memory for the shellcode function argument and write the argument into it.
+We do the same for the shellcode function, allocating 0x1000 bytes.
+This does not matter since 0x1000 bytes is a single memory page.</p>
+<p>Next, we get the thread ID, open a handle to the thread, and suspend it.
+Setting <code>threadContext.ContextFlags</code> to <code>CONTEXT_CONTROL</code> lets us modify the thread’s RIP.
+We then fill in the placeholders in the shellcode skeleton using <code>memcpy</code> and write the complete shellcode into memory.
+Finally, we update the thread’s RIP to point to the shellcode and resume execution.</p>
+<h2 id="reverse-engineering">Reverse Engineering</h2>
+<h4 id="overview">Overview</h4>
+<p>Our target game is developed in Unity using the IL2CPP runtime. Unity games are generally easy to reverse engineer.</p>
+<p>For games using the Mono runtime, reversing is straightforward. The IL code can be converted back to C#, modified,
+and recompiled using tools like dnSpy.</p>
+<p>IL2CPP is a bit trickier but still relatively simple to reverse. As the name suggests, it converts Intermediate Language
+(IL) into C++ and precompiles all scripting code. Unlike Mono, which requires a separate virtual machine to JIT compile IL code at runtime,
+IL2CPP executes compiled code directly.</p>
+<p>The reason IL2CPP games are still easy to reverse engineer is the <code>global-metadata.dat</code> file. This metadata file is
+exported along with the game and is essential for runtime type information. Even though the code is compiled,
+the game still relies on this metadata to function.</p>
+<p>To extract useful information, we use IL2CPP Dumper, providing it with both <code>GameAssembly.dll</code> and the metadata file.
+This tool generates DLLs containing the game&rsquo;s assembly with C# code, which we can analyze using dnSpy.
+However, unlike with Mono, we can see only the structure, class names, method names, offsets, etc., but not the function bodies.</p>
+<p>To analyze function implementations, we use a static reverse engineering tool like Ghidra (my personal choice).
+IL2CPP Dumper also provides scripts that automatically rename labels in Ghidra, making the decompiled code more readable.</p>
+<h4 id="searching-for-the-crop-planting-function">Searching for the Crop Planting Function</h4>
+<p>Surprisingly, the game&rsquo;s code was not obfuscated, so all class, property, and function names were visible. I searched for the function responsible for planting crops but did not find much.</p>
+<p>However, I had previously discovered a function that seemed promising. At the start of my research, I placed a breakpoint on the <code>send</code> function from <code>winsock2.h</code>, which sends data over a socket. By performing various in-game actions and comparing call stacks, I identified the &ldquo;Process Input&rdquo; function in the game’s logic.</p>
+<p>Using this function and following clues in the Ghidra decompilation, I located <code>some_func.&lt;&gt;d__11$$MoveNext(int *param_1)</code> (name changed). Debugging confirmed that this function executed <strong>only</strong> when I planted a crop.</p>
+<p>From its name, it was clear that this function was part of IL2CPP’s async/await setup. This made sense, as it likely sent a request to the server and needed to avoid blocking the main thread.</p>
+<p>The function contained many UI-related operations and what I call &ldquo;Register Type&rdquo; functions. These functions use absolute values from the data section, and while I am not entirely certain, I believe they interact with type metadata. My understanding is that they register types, including method and property data, with the IL2CPP runtime. Since IL2CPP still supports reflection, garbage collection, and runtime generics, it needs this system in place.</p>
+<h2 id="hacking">Hacking</h2>
+<p>While analyzing the code, I noticed a function called <code>RequestClientExtensions$$GetAwaiter</code>, which took a single argument.
+This argument was a newly instantiated object, the name of its constructor indicated that it was a planting-related object.</p>
+<p><code>RequestClientExtensions$$GetAwaiter</code> called <code>RequestClientExtensions$$Run</code>, which eventually called <code>SendRequest</code> on the singleton responsible for network communication.</p>
+<p>Using dnSpy, I confirmed that the planting-related class inherited from a class responsible for making network requests.
+The planting-related class had two fields, which were assigned as follows:</p>
+<pre tabindex="0"><code>*(undefined8 *)(lVar7 + 0x48) = *(undefined8 *)(lVar2 + 0x40);
+thunk_FUN_0039bf80(lVar7 + 0x48);
+*(undefined8 *)(lVar7 + 0x40) = uVar9;
+thunk_FUN_0039bf80(lVar7 + 0x40,uVar9);
+</code></pre><p>Thanks to metadata, I immediately recognized these fields as the crop to be planted and the tiles where it should be planted.</p>
+<p>At that stage, I needed to retrieve the crop and tile array objects. I&rsquo;ll describe my approach without including the decompilation output,
+which would certainly make things easier, but I prefer not to disclose that much about the game.</p>
+<h4 id="getting-the-crop-object">Getting the Crop Object</h4>
+<p>I managed to bypass some complexity by finding a pointer chain to the wheat crop object. A pointer chain starts
+with a static address and a sequence of offsets.
+By following these pointers, I could reliably access the wheat crop object even after restarting the game.</p>
+<p>To find the pointer chain, I used Cheat Engine&rsquo;s pointer scanner, which made the process quick and easy.
+To dereference the chain in C++, we use a function like this:</p>
+<pre tabindex="0"><code>uint64_t Addr(HANDLE hProc, uint64_t ptr, std::vector&lt;unsigned int&gt; offsets)
+{
+    uint64_t addr = ptr;
+    for (uint32_t i = 0; i &lt; offsets.size(); ++i)
+    {
+        ReadProcessMemory(hProc, (BYTE*)addr, &amp;addr, sizeof(addr), 0);
+        addr += offsets[i];
+    }
+    return addr;
+}
+</code></pre><p>All crop objects were stored in an IL2CPP collection. While the collection includes additional IL2CPP header and metadata,
+the objects themselves are stored within predictable offsets of each other. This allowed me to access different crops by
+adding a fixed value to the wheat crop’s address.</p>
+<h4 id="finishing-planting-shellcode">Finishing Planting Shellcode</h4>
+<p>We need the array of tile IDs. To get them, I followed the logic inside <code>some_func.&lt;&gt;d__11$$MoveNext(int *param_1)</code>.
+This function processes type registrations and performs enumerable operations like <code>ToArray</code> and <code>Select</code>.</p>
+<p>In the end, I wrote the following shellcode to automatically plant wheat on all available tiles:</p>
+<pre tabindex="0"><code>void ShellcodeFunc(ArgToShellcodeFunc* arg)
+{
+    arg-&gt;func_1(&amp;(arg-&gt;field_1), 1);
+    arg-&gt;func_1(&amp;(arg-&gt;field_9), 1);
+    arg-&gt;func_1(&amp;(arg-&gt;field_2), 1);
+    arg-&gt;func_1(&amp;(arg-&gt;field_5), 1);
+    arg-&gt;func_1(&amp;(arg-&gt;field_7), 1);
+
+    if (*(int*)(arg-&gt;field_2 + 0xe0) == 0) {
+        arg-&gt;func_2(arg-&gt;field_2);
+    }
+
+    BYTE* var_1 = (BYTE*)(arg-&gt;baseAddrGameAssemblyDLL + 0x030dee5c);
+    *var_1 = 1;
+
+    auto var_2 = *(int64_t*)(**(int64_t**)(arg-&gt;field_2 + 0xb8) + 0x28);
+    
+    auto var_3 = arg-&gt;func_3(var_2, 0, 0, 0, arg-&gt;field_1);
+
+    arg-&gt;func_1(&amp;(arg-&gt;field_3), 1);
+    arg-&gt;func_1(&amp;(arg-&gt;field_4), 1);
+    arg-&gt;func_1(&amp;(arg-&gt;field_6), 1);
+
+    auto var_4 = arg-&gt;func_4(arg-&gt;field_5);
+
+    if (*(int*)(arg-&gt;field_6 + 0xe0) == 0) {
+        arg-&gt;func_2(arg-&gt;field_6);
+    }
+    volatile auto var_5 = **(uint64_t**)(arg-&gt;field_6 + 0xb8);
+
+    arg-&gt;func_5((int64_t)var_4, var_5, arg-&gt;field_7, 0);
+
+    *(int64_t*) (*(int64_t*)(arg-&gt;field_6 + 0xb8) + 8) = (int64_t)var_4;
+
+    arg-&gt;func_6(*(int64_t*)(arg-&gt;field_6 + 0xb8) + 8, (uint64_t)var_4);
+    
+    var_5 = arg-&gt;func_7((int64_t*)var_3, (int64_t)var_4, arg-&gt;field_3);
+
+    var_5 = arg-&gt;func_8(var_5, arg-&gt;field_4);
+
+    int64_t var_6 = (int64_t)(arg-&gt;func_4(arg-&gt;field_9));
+
+    arg-&gt;func_9((uint64_t)var_6, 0);
+
+    *(uint64_t*)(var_6 + 0x48) = arg-&gt;field_8;
+
+    arg-&gt;func_10(var_6 + 0x48);
+
+    *(uint64_t*)(var_6 + 0x40) = var_5;
+
+    arg-&gt;func_6(var_6 + 0x40, var_5);
+
+    arg-&gt;func_11((int64_t*)var_6, 0);
+}
+</code></pre><p>In my original code, about half of the functions and variables had meaningful names.
+Replacing the original names with generic ones (for confidentiality) makes the code a bit harder to read, but not really.
+I don’t fully understand what each function does anyway, since we’re just working with addresses,
+casting them to function pointers, and calling them. These functions come from reverse engineering
+and decompiled output, so a lot of the time, I don’t even care what the function is actually doing or how it works.</p>
+<h4 id="mistake">Mistake</h4>
+<p>As I worked on automating crop collection, I realized it was more complex than planting.
+Unlike planting, collection required two separate network requests.
+Much of the necessary data was also being obtained from lower in the call stack.</p>
+<p>I tried tracing the logic further down, hoping to replicate a function that handled input directly.
+I thought simulating mouse movement to trigger collection might simplify things.
+This required several IL2CPP objects, such as <code>PointerEventData</code>, along with a few others.
+Unlike in native applications,
+I couldn&rsquo;t just copy memory to create them. They had to be properly instantiated
+through IL2CPP function calls so the runtime would recognize them.</p>
+<p>Before I could do that, I made a mistake that got me blocked. Out of curiosity, I sent 100
+consecutive crop collection requests to test a hypothesis I had. The next morning,
+I couldn&rsquo;t start the game. I think the server flagged my account and
+blocked requests from my IP or something like that.</p>
+<p>I probably could have bypassed this (Virtual Machine + masking IP) and continued working on the bot, but I chose to let it go.
+Maybe I&rsquo;ll revisit it one day.</p>
+<h2 id="final-thoughts">Final Thoughts</h2>
+<p>This was a great project to get a first look at reverse engineering and game hacking. I enjoyed it and will likely do more of this in the future.</p>
+<p>There is still a lot I want to explore, including OS internals, reverse engineering strategies, and advanced game hacking techniques.
+I would also like to learn more about kernel-level stuff, such as writing kernel drivers to bypass anti-cheats.</p>
+<p>For now, though, I have other projects I want to try. My next one will probably not be hacking-related.</p>
+]]></content>
+        </item>
+        
+    </channel>
+</rss>
