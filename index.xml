@@ -13,7 +13,7 @@
       <link>https://cacaocoder.github.io/posts/2025/02/developing-a-bot-to-automate-farming-in-an-online-video-game/</link>
       <pubDate>Wed, 26 Feb 2025 00:00:00 +0000</pubDate>
       <guid>https://cacaocoder.github.io/posts/2025/02/developing-a-bot-to-automate-farming-in-an-online-video-game/</guid>
-      <description>&lt;h2 id=&#34;project-overview&#34;&gt;Project Overview&lt;/h2&gt;&#xA;&lt;p&gt;Everything described here is purely for educational purposes (and, of course, for the fun of it).&#xA;The goal is to make a bot that does boring tasks in a farming game.&#xA;The source code is &lt;a href=&#34;https://github.com/CacaoCoder/farming-bot&#34;&gt;here&lt;/a&gt;, but I removed anything that could show what game it is.&#xA;Variable and function names are changed..&lt;/p&gt;&#xA;&lt;p&gt;The game is built with Unity and runs on the IL2CPP runtime. It is a casual online farming game where players can plant and harvest crops, among other activities.&lt;/p&gt;</description>
+      <description>&lt;h2 id=&#34;project-overview&#34;&gt;Project Overview&lt;/h2&gt;&#xA;&lt;p&gt;Everything described here is purely for educational purposes (and, of course, for the fun of it).&#xA;The goal is to make a bot that does boring tasks in a farming game.&#xA;The source code is &lt;a href=&#34;https://github.com/CacaoCoder/farming-bot&#34;&gt;here&lt;/a&gt;, but I removed anything that could show what game it is.&#xA;Variable and function names are changed.&lt;/p&gt;&#xA;&lt;p&gt;The game is built with Unity and runs on the IL2CPP runtime. It is a casual online farming game where players can plant and harvest crops, among other activities.&lt;/p&gt;</description>
     </item>
   </channel>
 </rss>
